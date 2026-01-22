@@ -1,0 +1,181 @@
+High-volume Reporting Module (individual Project) — Spec & Ideas
+
+High-Volume Reporting Module (Individual
+Project)
+Stack: Laravel 12, React, Docker, PostgreSQL, Octane (Swoole), Queues
+Goal: Build a blazing-fast reporting module that can process tens of millions of rows and
+generate:
+● Viewable reports in the web UI (paged & searchable)
+● Downloadable reports as PDF (supports 1,000+ pages) and Excel
+● Asynchronous generation with progress tracking
+
+A) Domains with Voluminous Data & 1,000+ Page Reports
+Use one of these domains as your scenario (or propose a similar one):
+1. Telecom CDRs (Call Detail Records): per-day/per-region call logs, SMS, data
+sessions.
+2. E‐commerce Order Ledger: orders, line items, refunds, shipments across
+months/regions.
+3. Banking/FinTech Transactions: ledger movements, reconciliations, AML audit trails.
+4. Government Census/Tax Filings: per‐barangay/municipality rollups + taxpayer ledgers.
+5. Healthcare Claims/Encounters: claims per insurer/hospital/month with
+diagnosis/procedure codes.
+6. Education LMS Activity: course events, logins, submissions, grading audits per term.
+7. Transportation/Logistics: GPS pings, waybills, delivery scans, route performance per
+hub.
+8. Manufacturing & IoT Telemetry: sensor readings, QC inspections, downtime logs.
+9. Cybersecurity/SIEM: auth events, firewall/proxy logs, vulnerability findings over time.
+10. Energy/Utilities (Smart Meters): half‐hourly meter reads by feeder/transformer/service
+area.
+11. Insurance Policies & Claims: policy lifecycle, endorsements, claims, reserves,
+payouts.
+12. AdTech/Analytics: impressions, clicks, conversions, spend by campaign/channel.
+These can easily exceed millions of rows and produce >1,000 PDF pages if
+printed with detailed tables + per‐entity sections.
+
+B) Functional Requirements
+1. Data Ingestion & Storage
+○ Import large CSV/Parquet files via queued jobs that stream rows in chunks
+(e.g., 10k rows/chunk).
+○ Store in PostgreSQL with a normalized core + reporting tables (denormalized)
+○ Support time‐range filters, entity filters (e.g., region, account), columns
+selection, sort, and group by.
+2. Report Types (choose at least 3)
+○ Detail Report: raw, paginated rows with selected columns
+○ Summary Report: grouped totals (e.g., by day/region)
+○ Top‐N/Exceptions: e.g., top call durations, failed transactions, SLA breaches
+○ Per‐Entity Booklet: one section per customer/site/campaign (can explode to
+1,000+ pages)
+3. Generation Modes
+○ Preview (fast): returns first N pages of results (server paging) for on‐screen
+review.
+○ Full Export (async): queues background job that writes PDF and Excel, sends a
+notification, exposes a signed URL.
+○ Scheduling: optional CRON‐based recurring exports (daily/weekly/monthly).
+4. PDF Output
+○ Page header/footer with title, filters, date, page x of y.
+○ Table of Contents when per‐entity.
+○ Automatic page breaks, widow/orphan control for tables, repeat table
+headers each page.
+○ Optional charts on summary (rendered once then embedded).
+5. Excel Output
+○ Multiple sheets for summaries vs details.
+○ Streaming writer; no memory‐heavy full‐data arrays.
+○ Correct data types (dates, numeric formats), freeze panes, filters.
+6. Web UI (React)
+○ Filter form (date pickers, selects), saved filter presets.
+○ Virtualized grid for massive lists (infinite scroll) + server‐side paging/sorting.
+○ Job status center: list user’s exports with statuses
+(Queued/Running/Done/Failed), progress %, size, download links.
+
+7. Notifications
+○ Notify on export completion/failure (in‐app toast + email via Mailhog in dev).
+
+C) Non‐Functional & Performance Requirements
+
+1. Data Scale (for grading)
+○ Load at least 10 million rows into a primary fact table.
+○ Prove p95 < 500 ms for typical preview queries (first page) under 20 VUs.
+○ Generate a 1,000+ page PDF and a 1M+ row Excel in separate async jobs.
+2. Throughput & Concurrency
+○ Laravel Octane (Swoole) enabled for API; tune workers, task workers.
+○ Use queues for heavy jobs; separate high and default queues.
+○ No request should block longer than 10s; long jobs must be async.
+3. Resource & Cost Controls
+○ Stream everything; cap memory per process (< 256MB for workers).
+○ Chunk size adaptive (e.g., 5k–50k) based on row weight and memory.
+○ Backpressure: limit concurrent export jobs/user.
+4. Reliability
+○ Jobs are idempotent (resume on retry with checkpoints).
+○ Store progress state (rows processed, current section) to allow resume.
+○ Retry with exponential backoff; dead‐letter queue.
+5. Security
+○ Auth via session cookies; RBAC for report access.
+○ Signed download URLs with short TTL; per‐user scoping.
+○ Input validation and server‐side authorization on filters.
+○ Audit log for report generation & downloads.
+
+D) Architecture & Components
+Docker Compose services
+● api: Laravel 12 + PHP 8.2 + Octane (Swoole)
+● web: Nginx serving API and built React
+● client: React dev server (Vite + Tailwind)
+● db: PostgreSQL 15+ (with partitioning)
+● redis: cache, queues, rate limiting
+● worker: queue workers (horizon optional)
+● mailhog: dev email
+Key Laravel packages (suggested)
+● PDF: one of
+○ spatie/browsershot (Headless Chrome) — best for complex layouts/TOC
+○ or barryvdh/laravel-dompdf (simpler, but watch memory for 1k+ pages)
+● Excel: maatwebsite/excel (with FromQuery + WithChunkReading)
+● Queue: Redis + Horizon (optional for monitoring)
+
+React UI
+● Vite + TailwindCSS
+● Table virtualization: react-virtualized or @tanstack/react-virtual
+● Form state + schema: react-hook-form + zod
+Storage
+● Write artifacts to local storage/app/exports (dev) or S3‐compatible bucket.
+
+E) Database Design (example for CDR/Transactions)
+● facts records (PK id, occurred_at timestamptz, account_id, region_id, type, amount,
+duration, ...)
+● dimensions accounts, regions, types (lookup tables)
+● reporting tables (denormalized) e.g., records_daily_region with sum(amount),
+count(*)
+Performance features
+● Partition records by month (occurred_at) → records_2025_01, ...
+● Indexes:
+○ (occurred_at DESC) for time range
+○ (region_id, occurred_at) for filtered scans
+○ Partial indexes for common predicates (e.g., type = 'CALL').
+● Materialized views for heavy summaries; refresh async.
+● Use window functions for rankings; push aggregation into SQL.
+
+F) Reporting Flow (Async Export)
+1. User submits filters & format (PDF/Excel).
+2. API creates a ReportJob row (status=Queued) with serialized filters.
+3. Queue worker picks job → streams data via cursor/yield.
+4. For PDF:
+○ Build HTML by chunk (e.g., 2,000 rows per section) and render to PDF
+per‐section, then append/concatenate.
+○ Insert page breaks, repeat headers. For TOC, collect anchors then generate first.
+5. For Excel:
+
+○ Use FromQuery + WithChunkReading to stream rows; write sheet by sheet.
+6. Store artifact, update status/progress, emit notification. Expose signed download URL.
+Progress Tracking
+● Job table fields: total_rows, processed_rows, current_section, percent, started_at,
+finished_at, error.
+
+G) API Endpoints (sample)
+● POST /api/reports/preview → returns first page of data & total estimate
+● POST /api/reports/exports → enqueue export {format: pdf|xlsx,
+filters: {...}}
+● GET /api/reports/exports/{id} → status + signed download link (if ready)
+● GET /api/reports/presets / POST /api/reports/presets → saved filters
+● Admin: GET /api/admin/exports → monitor all jobs
+Auth & Security
+● Session cookie (HttpOnly, Secure, SameSite=Strict), CSRF, RBAC, rate limits.
+
+H) Configuration & Tuning
+● Octane (Swoole):
+○ workers=auto, task-workers=cpu*2
+○ Enable task workers for CPU-heavy rendering; offload PDF chunks to tasks.
+○ Warm boot Eloquent models, config, routes; avoid singleton state leaks.
+● Queues:
+○ Separate queues: high (previews), exports (PDF/XLSX)
+○ Concurrency: start with 2–4 workers each; scale to meet SLA
+● Memory:
+○ Use generators/Cursor for DB; never load all rows in memory.
+○ For Browsershot, render in batches; reuse a Chromium instance if possible.
+
+I) Testing & Validation
+
+● Factory‐seed 10M rows with realistic distributions.
+● Unit tests for filter parsing, SQL builders, permissions.
+● Feature tests for preview endpoints (p95 < 500 ms target).
+● Export tests: generate a 1,000+ page PDF & ≥1M row XLSX in CI (reduced scale
+locally).
+● Load tests with k6: 20 VUs for previews; 5 concurrent export jobs.
+● Failure drills: kill a worker mid‐export → job resumes without corruption.
